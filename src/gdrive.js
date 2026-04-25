@@ -9,6 +9,35 @@ const DRIVE_SCOPES = [
   "https://www.googleapis.com/auth/drive.metadata.readonly",
 ]
 const DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+const DRIVE_SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
+const folderNameCache = new Map()
+const sequenceCache = new Map()
+
+function formatDateYYYYMMDD(date) {
+  const yyyy = String(date.getFullYear()).padStart(4, "0")
+  const mm = String(date.getMonth() + 1).padStart(2, "0")
+  const dd = String(date.getDate()).padStart(2, "0")
+  return `${yyyy}${mm}${dd}`
+}
+
+function sanitizeFolderNameForFilename(name) {
+  const cleaned = String(name || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^\s+|\s+$/g, "")
+
+  return cleaned || "FOLDER"
+}
+
+async function getCachedFolderName(drive, folderId) {
+  if (folderNameCache.has(folderId)) return folderNameCache.get(folderId)
+
+  const info = await getFolderInfo(drive, folderId)
+  const safeName = sanitizeFolderNameForFilename(info?.name)
+  folderNameCache.set(folderId, safeName)
+  return safeName
+}
 
 function mapDriveError(error, context = {}) {
   const message = String(error?.message || "")
@@ -140,7 +169,9 @@ async function getDriveOAuthClient() {
         authClient = oauth2Client
 
         await saveCredentials(authClient, tokenPath, credentialsPath)
-        console.log("Token Google Drive dimigrasikan ke format authorized_user.")
+        console.log(
+          "Token Google Drive dimigrasikan ke format authorized_user.",
+        )
       }
     }
   }
@@ -176,11 +207,81 @@ export async function getDriveClient() {
 async function getFolderInfo(drive, folderId) {
   const response = await drive.files.get({
     fileId: folderId,
-    fields: "id,name,mimeType",
+    fields: "id,name,mimeType,shortcutDetails(targetId,targetMimeType)",
     supportsAllDrives: true,
   })
 
   return response.data
+}
+
+async function resolveFolderLike(drive, fileId) {
+  const info = await getFolderInfo(drive, fileId)
+
+  if (
+    info?.mimeType === DRIVE_SHORTCUT_MIME &&
+    info?.shortcutDetails?.targetId
+  ) {
+    const target = await getFolderInfo(drive, info.shortcutDetails.targetId)
+    if (target?.mimeType !== DRIVE_FOLDER_MIME) {
+      throw new Error(
+        `Shortcut tidak mengarah ke folder: ${info.name || info.id}`,
+      )
+    }
+    return {
+      id: target.id,
+      name: info.name || target.name,
+      mimeType: DRIVE_FOLDER_MIME,
+      isShortcut: true,
+      shortcutId: info.id,
+    }
+  }
+
+  return info
+}
+
+function escapeRegExp(value = "") {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+async function getNextSequenceNumber(drive, folderId, baseName) {
+  const cacheKey = `${folderId}:${baseName}`
+  const cached = sequenceCache.get(cacheKey)
+  if (cached) {
+    const next = cached + 1
+    sequenceCache.set(cacheKey, next)
+    return next
+  }
+
+  const prefix = `${baseName}_`
+  const names = []
+  let pageToken
+
+  do {
+    const response = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false and name contains '${prefix.replace(/'/g, "\\'")}'`,
+      fields: "nextPageToken,files(name)",
+      pageSize: 100,
+      pageToken,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+    })
+
+    names.push(...(response.data.files || []).map((file) => file.name || ""))
+    pageToken = response.data.nextPageToken
+  } while (pageToken)
+
+  const regex = new RegExp(`^${escapeRegExp(baseName)}_(\\d{4})\\.png$`, "i")
+  let max = 0
+  for (const name of names) {
+    const match = name.match(regex)
+    if (!match) continue
+    const number = Number(match[1])
+    if (Number.isInteger(number) && number > max) max = number
+  }
+
+  const next = max + 1
+  sequenceCache.set(cacheKey, next)
+  return next
 }
 
 async function listChildFolders(drive, parentId) {
@@ -189,15 +290,34 @@ async function listChildFolders(drive, parentId) {
 
   do {
     const response = await drive.files.list({
-      q: `'${parentId}' in parents and trashed = false and mimeType = '${DRIVE_FOLDER_MIME}'`,
-      fields: "nextPageToken,files(id,name)",
+      q: `'${parentId}' in parents and trashed = false and (mimeType = '${DRIVE_FOLDER_MIME}' or mimeType = '${DRIVE_SHORTCUT_MIME}')`,
+      fields:
+        "nextPageToken,files(id,name,mimeType,shortcutDetails(targetId,targetMimeType))",
       pageSize: 100,
       pageToken,
       includeItemsFromAllDrives: true,
       supportsAllDrives: true,
     })
 
-    folders.push(...(response.data.files || []))
+    for (const file of response.data.files || []) {
+      if (file.mimeType === DRIVE_FOLDER_MIME) {
+        folders.push(file)
+        continue
+      }
+
+      if (
+        file.mimeType === DRIVE_SHORTCUT_MIME &&
+        file.shortcutDetails?.targetId
+      ) {
+        folders.push({
+          id: file.shortcutDetails.targetId,
+          name: file.name,
+          mimeType: DRIVE_FOLDER_MIME,
+          isShortcut: true,
+          shortcutId: file.id,
+        })
+      }
+    }
     pageToken = response.data.nextPageToken
   } while (pageToken)
 
@@ -216,7 +336,7 @@ export async function listDriveFoldersFromRoot(
   let rootInfo
 
   try {
-    rootInfo = await getFolderInfo(drive, rootFolderId)
+    rootInfo = await resolveFolderLike(drive, rootFolderId)
   } catch (error) {
     throw mapDriveError(error, { rootFolderId })
   }
@@ -235,6 +355,7 @@ export async function listDriveFoldersFromRoot(
   ]
 
   const queue = [{ id: rootInfo.id, path: rootInfo.name, depth: 0 }]
+  const visited = new Set([rootInfo.id])
 
   while (queue.length > 0 && folders.length < maxFolders) {
     const current = queue.shift()
@@ -249,6 +370,9 @@ export async function listDriveFoldersFromRoot(
     }
 
     for (const child of children) {
+      if (visited.has(child.id)) continue
+      visited.add(child.id)
+
       const childPath = `${current.path}/${child.name}`
       const node = {
         id: child.id,
@@ -271,7 +395,7 @@ export async function listDriveFoldersFromRoot(
   return folders
 }
 
-export async function uploadMediaToDrive(media, folderId) {
+export async function uploadMediaToDrive(media, folderId, options = {}) {
   if (!folderId) {
     throw new Error("Folder ID Google Drive belum diisi.")
   }
@@ -281,9 +405,35 @@ export async function uploadMediaToDrive(media, folderId) {
   }
 
   const drive = await getDriveClient()
+  let effectiveFolderId = folderId
+  try {
+    const resolved = await resolveFolderLike(drive, folderId)
+    effectiveFolderId = resolved.id
+  } catch (error) {
+    throw mapDriveError(error, { targetFolderId: folderId })
+  }
 
-  const extension = getMimeExtension(media.mimetype)
-  const fileName = `arsipin-${new Date().toISOString().replace(/[:.]/g, "-")}.${extension}`
+  const datePart = formatDateYYYYMMDD(new Date())
+  let folderPart = "FOLDER"
+  try {
+    const hinted = sanitizeFolderNameForFilename(options.folderLabel)
+    folderPart =
+      options.folderLabel && hinted !== "FOLDER"
+        ? hinted
+        : await getCachedFolderName(drive, folderId)
+  } catch (error) {
+    throw mapDriveError(error, { targetFolderId: folderId })
+  }
+
+  const baseName = `${datePart}_${folderPart}`
+  let sequence = 1
+  try {
+    sequence = await getNextSequenceNumber(drive, effectiveFolderId, baseName)
+  } catch (error) {
+    throw mapDriveError(error, { targetFolderId: folderId })
+  }
+  const sequencePart = String(sequence).padStart(4, "0")
+  const fileName = `${baseName}_${sequencePart}.png`
   const buffer = Buffer.from(media.data, "base64")
 
   let response
@@ -291,7 +441,7 @@ export async function uploadMediaToDrive(media, folderId) {
     response = await drive.files.create({
       requestBody: {
         name: fileName,
-        parents: [folderId],
+        parents: [effectiveFolderId],
       },
       media: {
         mimeType: media.mimetype,
