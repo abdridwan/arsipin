@@ -6,7 +6,7 @@ Bot hanya memproses pesan command yang diawali `/`.
 ## Fitur Utama
 
 - Upload gambar ke Google Drive via command WhatsApp.
-- Mendukung reply ke gambar dengan `/kirim ...` atau `/upload-test ...`.
+- Mendukung reply ke gambar dengan `/kirim ...`.
 - Fallback ke kumpulan gambar terbaru pengirim command jika tidak reply.
 - OAuth Google Drive menggunakan akun user (bukan service account).
 - Struktur kode dipisah agar mudah dirawat:
@@ -75,7 +75,6 @@ Command utama:
 - `/menu` menampilkan daftar command.
 - `/ping` cek bot aktif.
 - `/kirim [instruksi]` upload gambar.
-- `/upload-test [instruksi]` alias dari `/kirim`.
 - `/pilih <nomor>` memilih folder saat bot minta konfirmasi.
 - `/reset` reset antrian gambar user di grup tersebut.
 
