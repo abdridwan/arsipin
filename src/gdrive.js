@@ -73,12 +73,14 @@ function mapDriveError(error, context = {}) {
 }
 
 function getMimeExtension(mimetype = "") {
-  const subtype = mimetype.split("/")[1] || "jpg"
+  const subtype = mimetype.split("/")[1] || "bin"
+  const normalizedSubtype = subtype.split(";")[0].trim().toLowerCase()
 
-  if (subtype === "jpeg") return "jpg"
-  if (subtype.includes(";")) return subtype.split(";")[0]
+  if (normalizedSubtype === "jpeg") return "jpg"
+  if (normalizedSubtype === "quicktime") return "mov"
+  if (!normalizedSubtype) return "bin"
 
-  return subtype
+  return normalizedSubtype
 }
 
 async function fileExists(filePath) {
@@ -270,7 +272,7 @@ async function getNextSequenceNumber(drive, folderId, baseName) {
     pageToken = response.data.nextPageToken
   } while (pageToken)
 
-  const regex = new RegExp(`^${escapeRegExp(baseName)}_(\\d{4})\\.png$`, "i")
+  const regex = new RegExp(`^${escapeRegExp(baseName)}_(\\d{4})\\.[^.]+$`, "i")
   let max = 0
   for (const name of names) {
     const match = name.match(regex)
@@ -432,8 +434,9 @@ export async function uploadMediaToDrive(media, folderId, options = {}) {
   } catch (error) {
     throw mapDriveError(error, { targetFolderId: folderId })
   }
+  const extension = getMimeExtension(media.mimetype)
   const sequencePart = String(sequence).padStart(4, "0")
-  const fileName = `${baseName}_${sequencePart}.png`
+  const fileName = `${baseName}_${sequencePart}.${extension}`
   const buffer = Buffer.from(media.data, "base64")
 
   let response

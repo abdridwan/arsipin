@@ -1,16 +1,19 @@
-# Arsipin WhatsApp Drive Bot
+<h1>
+  <img src="./.github/logo.png" alt="Arsipin Logo" width="128" height="128" style="border-radius:25%; vertical-align:middle; margin-right:10px;" />
+  Arsipin WhatsApp Drive Bot
+</h1>
 
-Arsipin adalah bot WhatsApp grup untuk mengarsipkan gambar ke Google Drive.
+Arsipin adalah bot WhatsApp grup untuk mengarsipkan media (gambar dan video) ke Google Drive.
 Bot hanya memproses pesan command yang diawali `/`.
 
 ## Fitur Utama
 
-- Upload gambar ke Google Drive via command WhatsApp.
-- Mendukung reply ke gambar dengan `/kirim ...`.
-- Fallback ke kumpulan gambar terbaru pengirim command jika tidak reply.
-- OAuth Google Drive menggunakan akun user (bukan service account).
+- Upload media (gambar/video) ke Google Drive via command WhatsApp.
+- Mendukung reply ke media dengan `/kirim ...`.
+- Fallback ke kumpulan media terbaru jika tidak reply.
+- OAuth Google Drive menggunakan akun user.
 - Struktur kode dipisah agar mudah dirawat:
-  - `src/index.js` untuk bot WhatsApp, command, dan resolver gambar.
+  - `src/index.js` untuk bot WhatsApp, command, dan resolver media.
   - `src/gdrive.js` untuk autentikasi dan upload Google Drive.
 
 ## Stack
@@ -62,6 +65,7 @@ node src/index.js
 ```
 
 Saat startup:
+
 - Terminal menampilkan QR code.
 - Scan QR dari akun WhatsApp bot.
 - Session akan disimpan di folder `.wwebjs_auth` (jangan dihapus jika ingin tetap login).
@@ -74,16 +78,19 @@ Command utama:
 
 - `/menu` menampilkan daftar command.
 - `/ping` cek bot aktif.
-- `/kirim [instruksi]` upload gambar.
+- `/kirim [instruksi]` upload media (gambar/video, video maks 100 MB).
 - `/pilih <nomor>` memilih folder saat bot minta konfirmasi.
-- `/reset` reset antrian gambar user di grup tersebut.
+- `/reset` reset antrian media user di grup tersebut.
 
 Flow upload:
 
-1. Kirim satu atau beberapa gambar ke grup.
+1. Kirim satu atau beberapa media (gambar/video) ke grup.
 2. Jalankan `/kirim ...`:
-  - Jika command adalah reply ke gambar: bot pakai gambar/relevansi album dari reply.
-  - Jika bukan reply: bot ambil gambar terbaru dari pengirim command.
+
+- Jika command adalah reply ke media: bot pakai media/relevansi album dari reply.
+- Jika bukan reply: bot ambil media terbaru (dengan fallback seluruh pengirim di grup bila perlu).
+- Video di atas 100 MB akan dilewati otomatis.
+
 3. Bot memilih folder tujuan (heuristik/AI saat tersedia, atau minta `/pilih` jika perlu).
 4. Bot upload ke Google Drive.
 
@@ -100,7 +107,8 @@ Flow upload:
 
 - `DRIVE_ROOT_FOLDER_ID belum di-set`: isi variabel env dengan ID folder Drive yang valid.
 - `Folder root tidak ditemukan/tidak bisa diakses`: pastikan akun OAuth punya akses folder tersebut.
-- Gambar reply tidak bisa diunduh: buka gambar di WhatsApp lalu kirim command lagi.
+- Media reply tidak bisa diunduh: buka media di WhatsApp lalu kirim command lagi.
+- Video tidak terupload: pastikan ukuran file tidak melebihi 100 MB.
 - Bot tidak merespons: pastikan command diawali `/` dan dikirim di grup, bukan chat personal.
 
 ## Keamanan dan Praktik Baik
