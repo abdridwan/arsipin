@@ -1,7 +1,6 @@
-<h1>
-  <img src="./.github/logo.png" alt="Arsipin Logo" width="128" height="128" style="border-radius:25%; vertical-align:middle; margin-right:10px;" />
-  Arsipin WhatsApp Drive Bot
-</h1>
+<p align="center">
+  <img src="./.github/card-preview.png" alt="Arsipin Card Preview" width="100%" />
+</p>
 
 Arsipin adalah bot WhatsApp grup untuk mengarsipkan media (gambar dan video) ke Google Drive.
 Bot hanya memproses pesan command yang diawali `/`.
