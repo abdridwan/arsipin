@@ -115,6 +115,7 @@ Flow upload:
 - Jangan commit file rahasia seperti `client_secrets.json`, `token.json`, dan `.env`.
 - Jangan hapus folder `.wwebjs_auth` jika ingin mempertahankan sesi login.
 - Batasi akses folder Google Drive sesuai kebutuhan operasional.
+- Gunakan Nomor WhatsApp yang diperuntukkan sebagai bot, jangan gunakan nomor pribadi agar terhindar dari hal-hal yang tidak diinginkan (blokir permanen/sementara).
 
 ## Roadmap Singkat
 
