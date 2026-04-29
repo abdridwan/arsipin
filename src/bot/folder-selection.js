@@ -76,6 +76,79 @@ function folderAcronym(value = "") {
     .toUpperCase()
 }
 
+function getPathSegments(path = "") {
+  return String(path || "")
+    .split("/")
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function isDirectChildPath(parentPath, childPath) {
+  const parentSegments = getPathSegments(parentPath)
+  const childSegments = getPathSegments(childPath)
+
+  if (childSegments.length !== parentSegments.length + 1) return false
+  for (let index = 0; index < parentSegments.length; index++) {
+    if (parentSegments[index] !== childSegments[index]) return false
+  }
+
+  return true
+}
+
+export function expandCandidateFoldersWithChildren(
+  candidates,
+  allFolders,
+  { maxCandidates = 5 } = {},
+) {
+  if (!Array.isArray(candidates) || !Array.isArray(allFolders)) return []
+
+  const max = Number(maxCandidates) > 0 ? Number(maxCandidates) : 5
+  const byId = new Map()
+  for (const folder of allFolders) {
+    if (folder?.id) byId.set(folder.id, folder)
+  }
+
+  const uniqueCandidates = []
+  const candidateSeen = new Set()
+  for (const folder of candidates) {
+    const normalized = folder?.id ? byId.get(folder.id) || folder : folder
+    if (!normalized?.id || candidateSeen.has(normalized.id)) continue
+    candidateSeen.add(normalized.id)
+    uniqueCandidates.push(normalized)
+  }
+
+  const result = []
+  const resultSeen = new Set()
+  for (const candidate of uniqueCandidates) {
+    if (result.length >= max) break
+
+    if (candidate?.id && !resultSeen.has(candidate.id)) {
+      result.push(candidate)
+      resultSeen.add(candidate.id)
+    }
+
+    if (result.length >= max) break
+
+    const directChildren = allFolders
+      .filter(
+        (folder) =>
+          folder?.id &&
+          folder.id !== candidate.id &&
+          isDirectChildPath(candidate.path, folder.path),
+      )
+      .sort((left, right) => String(left.path).localeCompare(String(right.path)))
+
+    for (const child of directChildren) {
+      if (result.length >= max) break
+      if (resultSeen.has(child.id)) continue
+      result.push(child)
+      resultSeen.add(child.id)
+    }
+  }
+
+  return result
+}
+
 export function rankFolderCandidatesByInstruction(instruction, folders) {
   const hint = normalizeText(extractFolderHint(instruction))
   if (!hint) return []

@@ -3,13 +3,13 @@ import { MENU_HEADER, withBranding, geminiClient } from "./config.js"
 import {
   buildSelectionPrompt,
   chooseFolderWithGemini,
+  expandCandidateFoldersWithChildren,
   getDirectFolderMatches,
   rankFolderCandidatesByInstruction,
 } from "./folder-selection.js"
 import {
   clearLastUploadedAtForSender,
   clearPendingSelection,
-  clearRecentImagesForSender,
   clearSelectionCutoffForSender,
   clearUploadedImagesForSender,
   getMessageText,
@@ -21,7 +21,6 @@ import {
   markMediaAsUploaded,
   normalizeMessageTimestampMs,
   rememberIncomingMedia,
-  removeMediaFromStoreByMessageIds,
   resolveUploadMedias,
   setLastUploadedAt,
   setPendingSelection,
@@ -69,6 +68,228 @@ async function uploadPreparedMediasToFolder(medias, folder) {
   return { success, uploadedFiles }
 }
 
+function buildResendConfirmationPrompt(mediaCount) {
+  return withBranding([
+    `Terdeteksi ${mediaCount} media yang pernah di-upload sebelumnya.`,
+    "Apakah ingin kirim ulang?",
+    "Ketik */pilih 1* untuk Ya (kirim ulang).",
+    "Ketik */pilih 2* untuk Tidak (batal).",
+  ])
+}
+
+async function continueUploadFlow({
+  message,
+  senderId,
+  instruction,
+  medias,
+  messageIds,
+  maxTimestamp,
+  skippedTooLargeVideos,
+}) {
+  const rootFolderId = process.env.DRIVE_ROOT_FOLDER_ID
+  if (!rootFolderId) {
+    await message.reply("DRIVE_ROOT_FOLDER_ID belum di-set di .env")
+    return
+  }
+
+  const folders = await listDriveFoldersFromRoot(rootFolderId, {
+    maxDepth: 3,
+    maxFolders: 200,
+  })
+  if (!folders.length) {
+    await message.reply("Folder Drive dari root tidak ditemukan.")
+    return
+  }
+
+  const rankedCandidates = rankFolderCandidatesByInstruction(instruction, folders)
+  const directMatches = getDirectFolderMatches(instruction, folders)
+  const topCandidates = rankedCandidates
+    .slice(0, Math.min(5, rankedCandidates.length))
+    .map((item) => item.folder)
+  const toSelectionCandidates = (candidates) =>
+    expandCandidateFoldersWithChildren(candidates, folders, { maxCandidates: 5 })
+
+  if (directMatches.length === 1) {
+    const selectedFolder = directMatches[0]
+    await message.reply(
+      `Folder terpilih dari instruksi: ${selectedFolder.path}. Mulai upload ${medias.length} media...`,
+    )
+
+    const { success, uploadedFiles } = await uploadPreparedMediasToFolder(
+      medias,
+      selectedFolder,
+    )
+
+    if (success > 0) {
+      markMediaAsUploaded(message.from, senderId, messageIds)
+      setLastUploadedAt(message.from, senderId, maxTimestamp)
+    }
+    setSelectionCutoff(message.from, senderId, maxTimestamp || Date.now())
+
+    await message.reply(
+      withBranding(
+        [
+          `Berhasil upload ${success} media ke ${selectedFolder.path}.`,
+          skippedTooLargeVideos > 0
+            ? `Video >100MB dilewati: ${skippedTooLargeVideos}.`
+            : "",
+          uploadedFiles.length ? `File: ${uploadedFiles.join(", ")}` : "",
+        ].filter(Boolean),
+      ),
+    )
+    return
+  }
+
+  if (directMatches.length > 1) {
+    const scopeKey = getSenderScopeKey(message)
+    const candidateFolders = toSelectionCandidates(directMatches.slice(0, 5))
+    setPendingSelection(scopeKey, {
+      type: "folder-selection",
+      medias,
+      candidateFolders,
+      messageIds,
+      maxTimestamp,
+    })
+
+    await message.reply(buildSelectionPrompt(candidateFolders))
+    return
+  }
+
+  const hasStrongHeuristicMatch =
+    rankedCandidates.length > 0 &&
+    rankedCandidates[0].score >= 80 &&
+    (rankedCandidates.length === 1 ||
+      rankedCandidates[0].score - rankedCandidates[1].score >= 20)
+
+  if (hasStrongHeuristicMatch) {
+    const selectedFolder = rankedCandidates[0].folder
+    await message.reply(
+      `Folder terpilih dari instruksi: ${selectedFolder.path}. Mulai upload ${medias.length} media...`,
+    )
+
+    const { success, uploadedFiles } = await uploadPreparedMediasToFolder(
+      medias,
+      selectedFolder,
+    )
+
+    if (success > 0) {
+      markMediaAsUploaded(message.from, senderId, messageIds)
+      setLastUploadedAt(message.from, senderId, maxTimestamp)
+    }
+    setSelectionCutoff(message.from, senderId, maxTimestamp || Date.now())
+
+    await message.reply(
+      withBranding(
+        [
+          `Berhasil upload ${success} media ke ${selectedFolder.path}.`,
+          skippedTooLargeVideos > 0
+            ? `Video >100MB dilewati: ${skippedTooLargeVideos}.`
+            : "",
+          uploadedFiles.length ? `File: ${uploadedFiles.join(", ")}` : "",
+        ].filter(Boolean),
+      ),
+    )
+    return
+  }
+
+  if (!geminiClient) {
+    if (!topCandidates.length) {
+      await message.reply(
+        "Folder tujuan belum jelas dan GEMINI_API_KEY belum di-set. Coba /kirim ke <nama folder> yang lebih spesifik.",
+      )
+      return
+    }
+
+    const scopeKey = getSenderScopeKey(message)
+    const candidateFolders = toSelectionCandidates(topCandidates)
+    setPendingSelection(scopeKey, {
+      type: "folder-selection",
+      medias,
+      candidateFolders,
+      messageIds,
+      maxTimestamp,
+    })
+
+    await message.reply(buildSelectionPrompt(candidateFolders))
+    return
+  }
+
+  let aiChoice
+  try {
+    aiChoice = await chooseFolderWithGemini({
+      instruction,
+      folders,
+      mediaCount: medias.length,
+    })
+  } catch {
+    const fallbackCandidates =
+      topCandidates.length > 0
+        ? topCandidates
+        : folders.slice(0, Math.min(5, folders.length))
+    const candidateFolders = toSelectionCandidates(fallbackCandidates)
+
+    const scopeKey = getSenderScopeKey(message)
+    setPendingSelection(scopeKey, {
+      type: "folder-selection",
+      medias,
+      candidateFolders,
+      messageIds,
+      maxTimestamp,
+    })
+
+    await message.reply(buildSelectionPrompt(candidateFolders))
+    return
+  }
+
+  if (aiChoice.shouldConfirm) {
+    const scopeKey = getSenderScopeKey(message)
+    const candidateFolders =
+      aiChoice.candidateFolders.length > 0
+        ? aiChoice.candidateFolders
+        : topCandidates
+    const expandedCandidates = toSelectionCandidates(candidateFolders)
+
+    setPendingSelection(scopeKey, {
+      type: "folder-selection",
+      medias,
+      candidateFolders: expandedCandidates,
+      messageIds,
+      maxTimestamp,
+    })
+
+    await message.reply(buildSelectionPrompt(expandedCandidates))
+    return
+  }
+
+  const selectedFolder = aiChoice.selectedFolder
+  await message.reply(
+    `Folder terpilih: ${selectedFolder.path} (confidence ${aiChoice.confidence.toFixed(2)}). Mulai upload ${medias.length} media...`,
+  )
+
+  const { success, uploadedFiles } = await uploadPreparedMediasToFolder(
+    medias,
+    selectedFolder,
+  )
+
+  if (success > 0) {
+    markMediaAsUploaded(message.from, senderId, messageIds)
+    setLastUploadedAt(message.from, senderId, maxTimestamp)
+  }
+  setSelectionCutoff(message.from, senderId, maxTimestamp || Date.now())
+
+  await message.reply(
+    withBranding(
+      [
+        `Berhasil upload ${success} media ke ${selectedFolder.path}.`,
+        skippedTooLargeVideos > 0
+          ? `Video >100MB dilewati: ${skippedTooLargeVideos}.`
+          : "",
+        uploadedFiles.length ? `File: ${uploadedFiles.join(", ")}` : "",
+      ].filter(Boolean),
+    ),
+  )
+}
+
 export async function handleIncomingMessage(message, source = "message") {
   try {
     const chat = await message.getChat()
@@ -103,7 +324,6 @@ export async function handleIncomingMessage(message, source = "message") {
     }
 
     if (text === "/reset") {
-      const deletedCount = clearRecentImagesForSender(message.from, senderId)
       const uploadedDeletedCount = clearUploadedImagesForSender(
         message.from,
         senderId,
@@ -114,7 +334,7 @@ export async function handleIncomingMessage(message, source = "message") {
         updateGroupScope: false,
       })
       await message.reply(
-        `Antrian Anda berhasil di-reset. Dihapus: ${deletedCount} media antrian + ${uploadedDeletedCount} riwayat upload.`,
+        `Status upload Anda berhasil di-reset. Riwayat upload yang dihapus: ${uploadedDeletedCount}. Media di memori tetap disimpan agar bisa dipakai upload ulang.`,
       )
       return
     }
@@ -129,7 +349,7 @@ export async function handleIncomingMessage(message, source = "message") {
           "- /ping - Cek respons bot (balas: pong).",
           "- /kirim [instruksi] - Upload media (gambar/video, video maks 100MB) dari reply atau antrian terbaru ke Drive.",
           "- /pilih <nomor> - Memilih folder saat bot meminta konfirmasi pilihan folder.",
-          "- /reset - Menghapus antrian media Anda di grup ini.",
+          "- /reset - Reset riwayat upload Anda (media memori tetap disimpan).",
         ]),
       )
       return
@@ -143,6 +363,40 @@ export async function handleIncomingMessage(message, source = "message") {
       if (!pending) {
         await message.reply(
           "Tidak ada pilihan folder yang menunggu konfirmasi. Jalankan /kirim dulu.",
+        )
+        return
+      }
+
+      if (pending.type === "resend-confirm") {
+        if (pilihNumber < 1 || pilihNumber > 2) {
+          await message.reply("Nomor tidak valid. Pilih 1 (ya) atau 2 (tidak).")
+          return
+        }
+
+        clearPendingSelection(scopeKey)
+
+        if (pilihNumber === 2) {
+          await message.reply("Baik, kirim ulang dibatalkan.")
+          return
+        }
+
+        await message.reply("Oke, lanjut kirim ulang media.")
+        await continueUploadFlow({
+          message,
+          senderId,
+          instruction: pending.instruction || "",
+          medias: pending.medias || [],
+          messageIds: pending.messageIds || [],
+          maxTimestamp: pending.maxTimestamp || 0,
+          skippedTooLargeVideos: pending.skippedTooLargeVideos || 0,
+        })
+        return
+      }
+
+      if (!Array.isArray(pending.candidateFolders) || !pending.candidateFolders.length) {
+        clearPendingSelection(scopeKey)
+        await message.reply(
+          "Data pilihan tidak valid atau sudah kedaluwarsa. Jalankan /kirim lagi.",
         )
         return
       }
@@ -163,7 +417,6 @@ export async function handleIncomingMessage(message, source = "message") {
       )
 
       if (success > 0) {
-        removeMediaFromStoreByMessageIds(pending.messageIds || [])
         markMediaAsUploaded(message.from, senderId, pending.messageIds || [])
         setLastUploadedAt(message.from, senderId, pending.maxTimestamp || 0)
       }
@@ -188,12 +441,6 @@ export async function handleIncomingMessage(message, source = "message") {
 
     if (!isKirimCommand(text)) return
 
-    const rootFolderId = process.env.DRIVE_ROOT_FOLDER_ID
-    if (!rootFolderId) {
-      await message.reply("DRIVE_ROOT_FOLDER_ID belum di-set di .env")
-      return
-    }
-
     const instruction = parseKirimInstruction(text)
     const commandTimestampMs = normalizeMessageTimestampMs(message)
     const targetItems = await getTargetMediaMessages(
@@ -217,199 +464,34 @@ export async function handleIncomingMessage(message, source = "message") {
       return
     }
 
-    const folders = await listDriveFoldersFromRoot(rootFolderId, {
-      maxDepth: 3,
-      maxFolders: 200,
-    })
-    if (!folders.length) {
-      await message.reply("Folder Drive dari root tidak ditemukan.")
-      return
-    }
+    const alreadyUploadedCount = targetItems.filter(
+      (item) => item?.alreadyUploaded,
+    ).length
 
-    const rankedCandidates = rankFolderCandidatesByInstruction(
-      instruction,
-      folders,
-    )
-    const directMatches = getDirectFolderMatches(instruction, folders)
-    const topCandidates = rankedCandidates
-      .slice(0, Math.min(5, rankedCandidates.length))
-      .map((item) => item.folder)
-
-    if (directMatches.length === 1) {
-      const selectedFolder = directMatches[0]
-      await message.reply(
-        `Folder terpilih dari instruksi: ${selectedFolder.path}. Mulai upload ${medias.length} media...`,
-      )
-
-      const { success, uploadedFiles } = await uploadPreparedMediasToFolder(
-        medias,
-        selectedFolder,
-      )
-
-      if (success > 0) {
-        removeMediaFromStoreByMessageIds(messageIds)
-        markMediaAsUploaded(message.from, senderId, messageIds)
-        setLastUploadedAt(message.from, senderId, maxTimestamp)
-      }
-      setSelectionCutoff(message.from, senderId, maxTimestamp || Date.now())
-
-      await message.reply(
-        withBranding(
-          [
-            `Berhasil upload ${success} media ke ${selectedFolder.path}.`,
-            skippedTooLargeVideos > 0
-              ? `Video >100MB dilewati: ${skippedTooLargeVideos}.`
-              : "",
-            uploadedFiles.length ? `File: ${uploadedFiles.join(", ")}` : "",
-          ].filter(Boolean),
-        ),
-      )
-      return
-    }
-
-    if (directMatches.length > 1) {
-      const scopeKey = getSenderScopeKey(message)
-      const candidateFolders = directMatches.slice(0, 5)
-      setPendingSelection(scopeKey, {
-        medias,
-        candidateFolders,
-        messageIds,
-        maxTimestamp,
-      })
-
-      await message.reply(buildSelectionPrompt(candidateFolders))
-      return
-    }
-
-    const hasStrongHeuristicMatch =
-      rankedCandidates.length > 0 &&
-      rankedCandidates[0].score >= 80 &&
-      (rankedCandidates.length === 1 ||
-        rankedCandidates[0].score - rankedCandidates[1].score >= 20)
-
-    if (hasStrongHeuristicMatch) {
-      const selectedFolder = rankedCandidates[0].folder
-      await message.reply(
-        `Folder terpilih dari instruksi: ${selectedFolder.path}. Mulai upload ${medias.length} media...`,
-      )
-
-      const { success, uploadedFiles } = await uploadPreparedMediasToFolder(
-        medias,
-        selectedFolder,
-      )
-
-      if (success > 0) {
-        removeMediaFromStoreByMessageIds(messageIds)
-        markMediaAsUploaded(message.from, senderId, messageIds)
-        setLastUploadedAt(message.from, senderId, maxTimestamp)
-      }
-      setSelectionCutoff(message.from, senderId, maxTimestamp || Date.now())
-
-      await message.reply(
-        withBranding(
-          [
-            `Berhasil upload ${success} media ke ${selectedFolder.path}.`,
-            skippedTooLargeVideos > 0
-              ? `Video >100MB dilewati: ${skippedTooLargeVideos}.`
-              : "",
-            uploadedFiles.length ? `File: ${uploadedFiles.join(", ")}` : "",
-          ].filter(Boolean),
-        ),
-      )
-      return
-    }
-
-    if (!geminiClient) {
-      if (!topCandidates.length) {
-        await message.reply(
-          "Folder tujuan belum jelas dan GEMINI_API_KEY belum di-set. Coba /kirim ke <nama folder> yang lebih spesifik.",
-        )
-        return
-      }
-
+    if (alreadyUploadedCount > 0) {
       const scopeKey = getSenderScopeKey(message)
       setPendingSelection(scopeKey, {
-        medias,
-        candidateFolders: topCandidates,
-        messageIds,
-        maxTimestamp,
-      })
-
-      await message.reply(buildSelectionPrompt(topCandidates))
-      return
-    }
-
-    let aiChoice
-    try {
-      aiChoice = await chooseFolderWithGemini({
+        type: "resend-confirm",
         instruction,
-        folders,
-        mediaCount: medias.length,
-      })
-    } catch {
-      const fallbackCandidates =
-        topCandidates.length > 0
-          ? topCandidates
-          : folders.slice(0, Math.min(5, folders.length))
-
-      const scopeKey = getSenderScopeKey(message)
-      setPendingSelection(scopeKey, {
         medias,
-        candidateFolders: fallbackCandidates,
         messageIds,
         maxTimestamp,
+        skippedTooLargeVideos,
       })
 
-      await message.reply(buildSelectionPrompt(fallbackCandidates))
+      await message.reply(buildResendConfirmationPrompt(alreadyUploadedCount))
       return
     }
 
-    if (aiChoice.shouldConfirm) {
-      const scopeKey = getSenderScopeKey(message)
-      const candidateFolders =
-        aiChoice.candidateFolders.length > 0
-          ? aiChoice.candidateFolders
-          : topCandidates
-
-      setPendingSelection(scopeKey, {
-        medias,
-        candidateFolders,
-        messageIds,
-        maxTimestamp,
-      })
-
-      await message.reply(buildSelectionPrompt(candidateFolders))
-      return
-    }
-
-    const selectedFolder = aiChoice.selectedFolder
-    await message.reply(
-      `Folder terpilih: ${selectedFolder.path} (confidence ${aiChoice.confidence.toFixed(2)}). Mulai upload ${medias.length} media...`,
-    )
-
-    const { success, uploadedFiles } = await uploadPreparedMediasToFolder(
+    await continueUploadFlow({
+      message,
+      senderId,
+      instruction,
       medias,
-      selectedFolder,
-    )
-
-    if (success > 0) {
-      removeMediaFromStoreByMessageIds(messageIds)
-      markMediaAsUploaded(message.from, senderId, messageIds)
-      setLastUploadedAt(message.from, senderId, maxTimestamp)
-    }
-    setSelectionCutoff(message.from, senderId, maxTimestamp || Date.now())
-
-    await message.reply(
-      withBranding(
-        [
-          `Berhasil upload ${success} media ke ${selectedFolder.path}.`,
-          skippedTooLargeVideos > 0
-            ? `Video >100MB dilewati: ${skippedTooLargeVideos}.`
-            : "",
-          uploadedFiles.length ? `File: ${uploadedFiles.join(", ")}` : "",
-        ].filter(Boolean),
-      ),
-    )
+      messageIds,
+      maxTimestamp,
+      skippedTooLargeVideos,
+    })
   } catch (error) {
     console.error("Error handler message:", error)
     try {

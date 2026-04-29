@@ -5,9 +5,10 @@ dotenv.config()
 
 export const MAX_RECENT_IMAGES = 20
 export const RECENT_IMAGE_MAX_AGE_MS = 30 * 60 * 1000
+export const MEDIA_STORE_RETENTION_MS = 3 * 24 * 60 * 60 * 1000
 export const PENDING_SELECTION_TTL_MS = 10 * 60 * 1000
-export const DEFAULT_SELECTION_WINDOW_MS = 2 * 60 * 1000
-export const QUOTED_BULK_WINDOW_MS = 90 * 1000
+export const DEFAULT_SELECTION_WINDOW_MS = 30 * 60 * 1000
+export const QUOTED_BULK_WINDOW_MS = 5 * 60 * 1000
 export const GROUP_SCOPE_SENDER = "__all__"
 export const MAX_VIDEO_SIZE_BYTES = 100 * 1024 * 1024
 

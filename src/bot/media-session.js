@@ -3,6 +3,7 @@ import {
   DEBUG_QUOTED_MEDIA,
   DEFAULT_SELECTION_WINDOW_MS,
   GROUP_SCOPE_SENDER,
+  MEDIA_STORE_RETENTION_MS,
   MAX_RECENT_IMAGES,
   MAX_VIDEO_SIZE_BYTES,
   PENDING_SELECTION_TTL_MS,
@@ -17,6 +18,8 @@ const pendingSelectionStore = new Map()
 const uploadedMediaStore = new Map()
 const lastUploadedAtStore = new Map()
 const selectionCutoffStore = new Map()
+let lastStorePruneAt = 0
+const STORE_PRUNE_INTERVAL_MS = 5 * 60 * 1000
 
 export function getMessageText(message) {
   return message.body?.trim() || ""
@@ -38,7 +41,59 @@ function getGroupScopeKey(groupId) {
   return getSenderStoreKey(groupId, GROUP_SCOPE_SENDER)
 }
 
+function pruneNumberStoreByAge(store, nowMs, maxAgeMs) {
+  if (!(store instanceof Map)) return
+  if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) return
+
+  for (const [key, value] of store.entries()) {
+    const timestampMs = Number(value || 0)
+    if (!timestampMs || nowMs - timestampMs > maxAgeMs) {
+      store.delete(key)
+    }
+  }
+}
+
+function pruneGlobalStores() {
+  const nowMs = Date.now()
+  if (nowMs - lastStorePruneAt < STORE_PRUNE_INTERVAL_MS) return
+  lastStorePruneAt = nowMs
+
+  for (const [key, list] of mediaStore.entries()) {
+    const next = (list || [])
+      .filter(
+        (item) =>
+          item?.timestamp &&
+          nowMs - Number(item.timestamp || 0) <= MEDIA_STORE_RETENTION_MS,
+      )
+      .slice(-MAX_RECENT_IMAGES)
+
+    if (!next.length) {
+      mediaStore.delete(key)
+    } else if (next.length !== list.length) {
+      mediaStore.set(key, next)
+    }
+  }
+
+  for (const [key, list] of uploadedMediaStore.entries()) {
+    const next = (list || []).filter(
+      (item) =>
+        item?.timestamp &&
+        nowMs - Number(item.timestamp || 0) <= RECENT_IMAGE_MAX_AGE_MS,
+    )
+
+    if (!next.length) {
+      uploadedMediaStore.delete(key)
+    } else if (next.length !== list.length) {
+      uploadedMediaStore.set(key, next)
+    }
+  }
+
+  pruneNumberStoreByAge(lastUploadedAtStore, nowMs, MEDIA_STORE_RETENTION_MS)
+  pruneNumberStoreByAge(selectionCutoffStore, nowMs, MEDIA_STORE_RETENTION_MS)
+}
+
 function getLastUploadedAt(groupId, senderId) {
+  pruneGlobalStores()
   const senderKey = getSenderStoreKey(groupId, senderId)
   const groupKey = getGroupScopeKey(groupId)
   return Math.max(
@@ -65,6 +120,7 @@ export function setLastUploadedAt(groupId, senderId, timestampMs) {
 }
 
 function getSelectionCutoff(groupId, senderId) {
+  pruneGlobalStores()
   const senderKey = getSenderStoreKey(groupId, senderId)
   const groupKey = getGroupScopeKey(groupId)
   return Math.max(
@@ -144,6 +200,7 @@ export function markMediaAsUploaded(groupId, senderId, messageIds) {
 }
 
 export function setPendingSelection(scopeKey, payload) {
+  pruneGlobalStores()
   pendingSelectionStore.set(scopeKey, {
     ...payload,
     createdAt: Date.now(),
@@ -151,6 +208,7 @@ export function setPendingSelection(scopeKey, payload) {
 }
 
 export function getPendingSelection(scopeKey) {
+  pruneGlobalStores()
   const pending = pendingSelectionStore.get(scopeKey)
   if (!pending) return null
 
@@ -167,6 +225,7 @@ export function clearPendingSelection(scopeKey) {
 }
 
 export function rememberIncomingMedia(message) {
+  pruneGlobalStores()
   if (!isSupportedMessageType(message)) return
 
   const groupId = message.from
@@ -185,23 +244,28 @@ export function rememberIncomingMedia(message) {
   mediaStore.set(key, list.slice(-MAX_RECENT_IMAGES))
 }
 
-function getRecentMedia(groupId, senderId) {
+function getRecentMedia(
+  groupId,
+  senderId,
+  { maxAgeMs = RECENT_IMAGE_MAX_AGE_MS } = {},
+) {
   const key = `${groupId}:${senderId}`
   const list = mediaStore.get(key) || []
 
-  return list.filter(
-    (item) => Date.now() - item.timestamp <= RECENT_IMAGE_MAX_AGE_MS,
-  )
+  return list.filter((item) => isWithinMaxAge(item.timestamp, maxAgeMs))
 }
 
-function getRecentMediaForGroup(groupId) {
+function getRecentMediaForGroup(
+  groupId,
+  { maxAgeMs = RECENT_IMAGE_MAX_AGE_MS } = {},
+) {
   const prefix = `${groupId}:`
   const all = []
 
   for (const [key, list] of mediaStore.entries()) {
     if (!key.startsWith(prefix)) continue
     for (const item of list) {
-      if (Date.now() - item.timestamp <= RECENT_IMAGE_MAX_AGE_MS) {
+      if (isWithinMaxAge(item.timestamp, maxAgeMs)) {
         all.push(item)
       }
     }
@@ -212,6 +276,33 @@ function getRecentMediaForGroup(groupId) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function pickNearestAlbumCandidates(candidates, targetTimestampMs) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return []
+
+  const nearest = candidates.reduce((best, item) => {
+    const distance = Math.abs(Number(item.timestamp || 0) - targetTimestampMs)
+    if (!best || distance < best.distance) {
+      return { item, distance }
+    }
+    return best
+  }, null)
+
+  if (!nearest?.item) return []
+
+  const aroundNearest = candidates.filter(
+    (item) =>
+      Math.abs(Number(item.timestamp || 0) - Number(nearest.item.timestamp || 0)) <=
+      QUOTED_BULK_WINDOW_MS,
+  )
+
+  return aroundNearest.length > 0 ? aroundNearest : [nearest.item]
+}
+
+function isWithinMaxAge(timestampMs, maxAgeMs) {
+  if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) return true
+  return Date.now() - timestampMs <= maxAgeMs
 }
 
 export function normalizeMessageTimestampMs(message) {
@@ -225,19 +316,23 @@ export function isSupportedMessageType(message) {
   return message?.type === "image" || message?.type === "video"
 }
 
-async function getRecentMediaFromChat(message, senderId) {
+async function getRecentMediaFromChat(
+  message,
+  senderId,
+  { maxAgeMs = RECENT_IMAGE_MAX_AGE_MS, limit = 50 } = {},
+) {
   try {
     const chat = await message.getChat()
-    const messages = await chat.fetchMessages({ limit: 50 })
+    const messages = await chat.fetchMessages({ limit })
 
     return messages
       .filter((item) => {
         if (!item?.hasMedia || item?.fromMe) return false
         if (!isSupportedMessageType(item)) return false
-        if (getSenderId(item) !== senderId) return false
+        if (senderId && getSenderId(item) !== senderId) return false
 
         const ts = normalizeMessageTimestampMs(item)
-        return Date.now() - ts <= RECENT_IMAGE_MAX_AGE_MS
+        return isWithinMaxAge(ts, maxAgeMs)
       })
       .map((item) => ({
         messageId: item.id?._serialized,
@@ -251,10 +346,13 @@ async function getRecentMediaFromChat(message, senderId) {
   }
 }
 
-async function getRecentMediaFromChatForGroup(message) {
+async function getRecentMediaFromChatForGroup(
+  message,
+  { maxAgeMs = RECENT_IMAGE_MAX_AGE_MS, limit = 80 } = {},
+) {
   try {
     const chat = await message.getChat()
-    const messages = await chat.fetchMessages({ limit: 80 })
+    const messages = await chat.fetchMessages({ limit })
 
     return messages
       .filter((item) => {
@@ -262,7 +360,7 @@ async function getRecentMediaFromChatForGroup(message) {
         if (!isSupportedMessageType(item)) return false
 
         const ts = normalizeMessageTimestampMs(item)
-        return Date.now() - ts <= RECENT_IMAGE_MAX_AGE_MS
+        return isWithinMaxAge(ts, maxAgeMs)
       })
       .map((item) => ({
         messageId: item.id?._serialized,
@@ -285,28 +383,35 @@ async function getSelectableRecentMediaItems(
     minTimestamp = 0,
     maxTimestamp = Number.POSITIVE_INFINITY,
     includeAllSenders = false,
+    maxAgeMs = RECENT_IMAGE_MAX_AGE_MS,
+    fetchLimit,
+    includeUploaded = false,
+    ignoreHistoryCutoff = false,
   } = {},
 ) {
   await sleep(1200)
 
   const storeItems = includeAllSenders
-    ? getRecentMediaForGroup(message.from)
-    : getRecentMedia(message.from, senderId)
+    ? getRecentMediaForGroup(message.from, { maxAgeMs })
+    : getRecentMedia(message.from, senderId, { maxAgeMs })
   const chatItems = includeAllSenders
-    ? await getRecentMediaFromChatForGroup(message)
-    : await getRecentMediaFromChat(message, senderId)
+    ? await getRecentMediaFromChatForGroup(message, {
+        maxAgeMs,
+        limit: Number(fetchLimit) || 80,
+      })
+    : await getRecentMediaFromChat(message, senderId, {
+        maxAgeMs,
+        limit: Number(fetchLimit) || 50,
+      })
   const uploadedIdSet = getUploadedMediaIdSet(message.from, senderId)
   const lastUploadedAt = getLastUploadedAt(message.from, senderId)
   const selectionCutoff = getSelectionCutoff(message.from, senderId)
   const defaultWindowCutoff = includeDefaultWindow
     ? Number(commandTimestampMs || Date.now()) - DEFAULT_SELECTION_WINDOW_MS
     : 0
-  const effectiveCutoff = Math.max(
-    0,
-    lastUploadedAt,
-    selectionCutoff,
-    defaultWindowCutoff,
-  )
+  const effectiveCutoff = ignoreHistoryCutoff
+    ? Math.max(0, defaultWindowCutoff)
+    : Math.max(0, lastUploadedAt, selectionCutoff, defaultWindowCutoff)
   const normalizedMinTimestamp = Number.isFinite(minTimestamp)
     ? minTimestamp
     : 0
@@ -317,11 +422,18 @@ async function getSelectableRecentMediaItems(
 
   for (const item of [...chatItems, ...storeItems]) {
     if (!item?.messageId) continue
-    if (uploadedIdSet.has(item.messageId)) continue
+    const alreadyUploaded = uploadedIdSet.has(item.messageId)
+    if (!includeUploaded && alreadyUploaded) continue
     if (effectiveCutoff > 0 && item.timestamp <= effectiveCutoff) continue
     if (item.timestamp < normalizedMinTimestamp) continue
     if (item.timestamp > normalizedMaxTimestamp) continue
-    mergedMap.set(item.messageId, item)
+
+    const existing = mergedMap.get(item.messageId)
+    mergedMap.set(item.messageId, {
+      ...item,
+      alreadyUploaded:
+        Boolean(existing?.alreadyUploaded) || Boolean(item?.alreadyUploaded) || alreadyUploaded,
+    })
   }
 
   return Array.from(mergedMap.values())
@@ -548,10 +660,15 @@ export async function getTargetMediaMessages(
   senderId,
   commandTimestampMs,
 ) {
+  const uploadedIdSet = getUploadedMediaIdSet(message.from, senderId)
+
   if (message.hasQuotedMsg) {
     const quoted = await message.getQuotedMessage()
     const quotedTimestampMs = normalizeMessageTimestampMs(quoted)
-    const quotedSenderId = getSenderId(quoted) || senderId
+    const quotedSenderId = getSenderId(quoted)
+    const shouldScanAllSenders =
+      !quotedSenderId || quotedSenderId === message.from
+    const quotedMessageId = quoted?.id?._serialized
 
     const media =
       (await downloadMediaFromMessage(quoted)) ||
@@ -563,20 +680,118 @@ export async function getTargetMediaMessages(
           source: "reply",
           message: quoted,
           media,
+          alreadyUploaded: Boolean(
+            quotedMessageId && uploadedIdSet.has(quotedMessageId),
+          ),
         },
       ]
     }
 
-    const albumCandidates = await getSelectableRecentMediaItems(
+    let albumCandidates = await getSelectableRecentMediaItems(
       message,
-      quotedSenderId,
+      shouldScanAllSenders ? senderId : quotedSenderId,
       {
         commandTimestampMs,
         includeDefaultWindow: false,
         minTimestamp: quotedTimestampMs - QUOTED_BULK_WINDOW_MS,
         maxTimestamp: quotedTimestampMs + QUOTED_BULK_WINDOW_MS,
+        includeAllSenders: shouldScanAllSenders,
+        maxAgeMs: Number.POSITIVE_INFINITY,
+        fetchLimit: 250,
+        includeUploaded: true,
+        ignoreHistoryCutoff: true,
       },
     )
+
+    if (albumCandidates.length === 0 && !shouldScanAllSenders) {
+      albumCandidates = await getSelectableRecentMediaItems(message, senderId, {
+        commandTimestampMs,
+        includeDefaultWindow: false,
+        minTimestamp: quotedTimestampMs - QUOTED_BULK_WINDOW_MS,
+        maxTimestamp: quotedTimestampMs + QUOTED_BULK_WINDOW_MS,
+        includeAllSenders: true,
+        maxAgeMs: Number.POSITIVE_INFINITY,
+        fetchLimit: 250,
+        includeUploaded: true,
+        ignoreHistoryCutoff: true,
+      })
+    }
+
+    if (albumCandidates.length === 0) {
+      const quotedFallbackWindowMs = 30 * 60 * 1000
+      albumCandidates = await getSelectableRecentMediaItems(
+        message,
+        shouldScanAllSenders ? senderId : quotedSenderId,
+        {
+          commandTimestampMs,
+          includeDefaultWindow: false,
+          minTimestamp: quotedTimestampMs - quotedFallbackWindowMs,
+          maxTimestamp: quotedTimestampMs + quotedFallbackWindowMs,
+          includeAllSenders: shouldScanAllSenders,
+          maxAgeMs: Number.POSITIVE_INFINITY,
+          includeUploaded: true,
+          ignoreHistoryCutoff: true,
+          fetchLimit: 250,
+        },
+      )
+    }
+
+    if (albumCandidates.length === 0 && !shouldScanAllSenders) {
+      const quotedFallbackWindowMs = 30 * 60 * 1000
+      albumCandidates = await getSelectableRecentMediaItems(message, senderId, {
+        commandTimestampMs,
+        includeDefaultWindow: false,
+        minTimestamp: quotedTimestampMs - quotedFallbackWindowMs,
+        maxTimestamp: quotedTimestampMs + quotedFallbackWindowMs,
+        includeAllSenders: true,
+        maxAgeMs: Number.POSITIVE_INFINITY,
+        includeUploaded: true,
+        ignoreHistoryCutoff: true,
+        fetchLimit: 250,
+      })
+    }
+
+    if (albumCandidates.length === 0) {
+      const broadCandidates = await getSelectableRecentMediaItems(
+        message,
+        shouldScanAllSenders ? senderId : quotedSenderId,
+        {
+          commandTimestampMs,
+          includeDefaultWindow: false,
+          includeAllSenders: shouldScanAllSenders,
+          maxAgeMs: Number.POSITIVE_INFINITY,
+          includeUploaded: true,
+          ignoreHistoryCutoff: true,
+          fetchLimit: 300,
+        },
+      )
+
+      albumCandidates = pickNearestAlbumCandidates(
+        broadCandidates,
+        quotedTimestampMs,
+      )
+    }
+
+    if (albumCandidates.length === 0 && !shouldScanAllSenders) {
+      const broadGroupCandidates = await getSelectableRecentMediaItems(
+        message,
+        senderId,
+        {
+          commandTimestampMs,
+          includeDefaultWindow: false,
+          includeAllSenders: true,
+          maxAgeMs: Number.POSITIVE_INFINITY,
+          includeUploaded: true,
+          ignoreHistoryCutoff: true,
+          fetchLimit: 300,
+        },
+      )
+
+      albumCandidates = pickNearestAlbumCandidates(
+        broadGroupCandidates,
+        quotedTimestampMs,
+      )
+    }
 
     if (albumCandidates.length > 0) {
       return albumCandidates.map((item) => ({

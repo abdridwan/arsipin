@@ -3,6 +3,9 @@ import qrcode from "qrcode-terminal"
 import { handleIncomingMessage } from "./bot/handler.js"
 
 const { Client, LocalAuth } = pkg
+const RECONNECT_DELAY_MS = 5000
+let isInitializing = false
+let reconnectTimer = null
 
 const client = new Client({
   authStrategy: new LocalAuth({
@@ -34,14 +37,54 @@ client.on("authenticated", () => {
 
 client.on("auth_failure", (message) => {
   console.error("Auth gagal:", message)
+  scheduleReconnect("auth_failure")
 })
 
 client.on("disconnected", (reason) => {
   console.log("Bot terputus:", reason)
+  scheduleReconnect(String(reason || "disconnected"))
 })
 
 client.on("message", async (message) => {
-  await handleIncomingMessage(message, "message")
+  try {
+    await handleIncomingMessage(message, "message")
+  } catch (error) {
+    console.error("Gagal memproses pesan:", error)
+  }
 })
 
-client.initialize()
+function scheduleReconnect(source) {
+  if (reconnectTimer) return
+
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null
+    console.log(`Mencoba koneksi ulang (${source})...`)
+    await initializeClient()
+  }, RECONNECT_DELAY_MS)
+}
+
+async function initializeClient() {
+  if (isInitializing) return
+  isInitializing = true
+  try {
+    await client.initialize()
+  } catch (error) {
+    const message = String(error?.message || error)
+    console.error("Inisialisasi client gagal:", message)
+    scheduleReconnect("initialize_error")
+  } finally {
+    isInitializing = false
+  }
+}
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason)
+  scheduleReconnect("unhandled_rejection")
+})
+
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error)
+  scheduleReconnect("uncaught_exception")
+})
+
+initializeClient()
