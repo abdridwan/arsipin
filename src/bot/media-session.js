@@ -255,6 +255,30 @@ function getRecentMedia(
   return list.filter((item) => isWithinMaxAge(item.timestamp, maxAgeMs))
 }
 
+export function findMessageInStoreByStanzaId(groupId, stanzaId, messageData) {
+  const possibleIds = [
+    stanzaId,
+    messageData?.quotedStanzaID,
+    messageData?.quotedMsg?.id,
+    messageData?.quotedMsg?.stanzaId
+  ].filter(Boolean)
+
+  if (possibleIds.length === 0) return null
+
+  const prefix = `${groupId}:`
+  for (const [key, list] of mediaStore.entries()) {
+    if (!key.startsWith(prefix)) continue
+    for (const item of list) {
+      if (item.messageId) {
+        for (const pid of possibleIds) {
+          if (item.messageId.includes(pid)) return item.message
+        }
+      }
+    }
+  }
+  return null
+}
+
 function getRecentMediaForGroup(
   groupId,
   { maxAgeMs = RECENT_IMAGE_MAX_AGE_MS } = {},
@@ -548,6 +572,7 @@ async function downloadMediaFromMessage(message) {
 }
 
 async function downloadQuotedMediaFromCommand(message) {
+  return null // dinonaktifkan sementara karena WA update merusak window.Store
   if (!message?.hasQuotedMsg) return null
 
   const result = await message.client.pupPage.evaluate(async (messageId) => {
@@ -663,9 +688,21 @@ export async function getTargetMediaMessages(
   const uploadedIdSet = getUploadedMediaIdSet(message.from, senderId)
 
   if (message.hasQuotedMsg) {
-    const quoted = await message.getQuotedMessage()
-    const quotedTimestampMs = normalizeMessageTimestampMs(quoted)
-    const quotedSenderId = getSenderId(quoted)
+    let quoted = null
+    const stanzaId = message._data?.quotedStanzaID || message._data?.quotedMsg?.id || message.id?._serialized
+    if (stanzaId || message._data) {
+      quoted = findMessageInStoreByStanzaId(message.from, stanzaId, message._data)
+    }
+    
+    if (!quoted) {
+      try {
+        quoted = await message.getQuotedMessage()
+      } catch (e) {
+        console.error("Gagal getQuotedMessage:", e.message)
+      }
+    }
+    const quotedTimestampMs = quoted ? normalizeMessageTimestampMs(quoted) : commandTimestampMs
+    const quotedSenderId = quoted ? getSenderId(quoted) : null
     const shouldScanAllSenders =
       !quotedSenderId || quotedSenderId === message.from
     const quotedMessageId = quoted?.id?._serialized
@@ -694,7 +731,7 @@ export async function getTargetMediaMessages(
         commandTimestampMs,
         includeDefaultWindow: false,
         minTimestamp: quotedTimestampMs - QUOTED_BULK_WINDOW_MS,
-        maxTimestamp: quotedTimestampMs + QUOTED_BULK_WINDOW_MS,
+        maxTimestamp: Number.POSITIVE_INFINITY, // Abaikan maxTimestamp untuk mencegah error clock drift
         includeAllSenders: shouldScanAllSenders,
         maxAgeMs: Number.POSITIVE_INFINITY,
         fetchLimit: 250,
@@ -708,7 +745,7 @@ export async function getTargetMediaMessages(
         commandTimestampMs,
         includeDefaultWindow: false,
         minTimestamp: quotedTimestampMs - QUOTED_BULK_WINDOW_MS,
-        maxTimestamp: quotedTimestampMs + QUOTED_BULK_WINDOW_MS,
+        maxTimestamp: Number.POSITIVE_INFINITY,
         includeAllSenders: true,
         maxAgeMs: Number.POSITIVE_INFINITY,
         fetchLimit: 250,
@@ -817,6 +854,26 @@ export async function getTargetMediaMessages(
     commandTimestampMs,
     includeDefaultWindow: true,
   })
+
+  // Pastikan pesan saat ini selalu dimasukkan jika ia sendiri adalah media (gambar/video dengan caption /kirim)
+  if (message.hasMedia && isSupportedMessageType(message)) {
+    const exists = senderItems.some(
+      (item) => item.messageId === message.id._serialized
+    )
+    if (!exists) {
+      senderItems.push({
+        messageId: message.id._serialized,
+        groupId: message.from,
+        senderId,
+        timestamp: commandTimestampMs,
+        message: message,
+        alreadyUploaded: uploadedIdSet.has(message.id._serialized),
+      })
+      // sort ulang berdasarkan timestamp (yang tertua di depan)
+      senderItems.sort((a, b) => a.timestamp - b.timestamp)
+    }
+  }
+
   if (senderItems.length > 0) {
     return senderItems.map((item) => ({
       source: "recent",

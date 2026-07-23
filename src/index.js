@@ -12,6 +12,10 @@ const client = new Client({
     clientId: "arsipin-bot",
     dataPath: ".wwebjs_auth",
   }),
+  webVersionCache: {
+    type: "remote",
+    remotePath: "https://raw.githubusercontent.com/wppconnect-team/wa-version/7f959f352158729c6e88dd77cf7d38447d7be713/html/2.2412.54.html",
+  },
   puppeteer: {
     headless: true,
     args: [

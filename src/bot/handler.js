@@ -85,6 +85,7 @@ async function continueUploadFlow({
   messageIds,
   maxTimestamp,
   skippedTooLargeVideos,
+  skippedUnavailableMedia,
 }) {
   const rootFolderId = process.env.DRIVE_ROOT_FOLDER_ID
   if (!rootFolderId) {
@@ -132,6 +133,9 @@ async function continueUploadFlow({
           `Berhasil upload ${success} media ke ${selectedFolder.path}.`,
           skippedTooLargeVideos > 0
             ? `Video >100MB dilewati: ${skippedTooLargeVideos}.`
+            : "",
+          skippedUnavailableMedia > 0
+            ? `Media gagal diunduh/dibuka saat proses: ${skippedUnavailableMedia}.`
             : "",
           uploadedFiles.length ? `File: ${uploadedFiles.join(", ")}` : "",
         ].filter(Boolean),
@@ -184,6 +188,9 @@ async function continueUploadFlow({
           `Berhasil upload ${success} media ke ${selectedFolder.path}.`,
           skippedTooLargeVideos > 0
             ? `Video >100MB dilewati: ${skippedTooLargeVideos}.`
+            : "",
+          skippedUnavailableMedia > 0
+            ? `Media gagal diunduh/dibuka saat proses: ${skippedUnavailableMedia}.`
             : "",
           uploadedFiles.length ? `File: ${uploadedFiles.join(", ")}` : "",
         ].filter(Boolean),
@@ -284,6 +291,9 @@ async function continueUploadFlow({
         skippedTooLargeVideos > 0
           ? `Video >100MB dilewati: ${skippedTooLargeVideos}.`
           : "",
+        skippedUnavailableMedia > 0
+          ? `Media gagal diunduh/dibuka saat proses: ${skippedUnavailableMedia}.`
+          : "",
         uploadedFiles.length ? `File: ${uploadedFiles.join(", ")}` : "",
       ].filter(Boolean),
     ),
@@ -292,8 +302,8 @@ async function continueUploadFlow({
 
 export async function handleIncomingMessage(message, source = "message") {
   try {
-    const chat = await message.getChat()
-    if (!chat.isGroup) return
+    const isGroup = message.from && message.from.endsWith('@g.us')
+    if (!isGroup) return
 
     const senderId = getSenderId(message)
     const text = getMessageText(message)
@@ -389,6 +399,7 @@ export async function handleIncomingMessage(message, source = "message") {
           messageIds: pending.messageIds || [],
           maxTimestamp: pending.maxTimestamp || 0,
           skippedTooLargeVideos: pending.skippedTooLargeVideos || 0,
+          skippedUnavailableMedia: pending.skippedUnavailableMedia || 0,
         })
         return
       }
@@ -448,13 +459,23 @@ export async function handleIncomingMessage(message, source = "message") {
       senderId,
       commandTimestampMs,
     )
-    const { medias, messageIds, maxTimestamp, skippedTooLargeVideos } =
+    const {
+      medias,
+      messageIds,
+      maxTimestamp,
+      skippedTooLargeVideos,
+      skippedUnavailableMedia,
+    } =
       await resolveUploadMedias(targetItems)
 
     if (medias.length === 0) {
       if (skippedTooLargeVideos > 0) {
         await message.reply(
           `Semua video melebihi batas 100 MB. Video terlalu besar yang dilewati: ${skippedTooLargeVideos}.`,
+        )
+      } else if (skippedUnavailableMedia > 0) {
+        await message.reply(
+          `Media terdeteksi, tetapi tidak bisa diunduh seluruhnya. Media gagal diunduh: ${skippedUnavailableMedia}. Coba /kirim ulang 3-5 detik lagi.`,
         )
       } else {
         await message.reply(
@@ -477,6 +498,7 @@ export async function handleIncomingMessage(message, source = "message") {
         messageIds,
         maxTimestamp,
         skippedTooLargeVideos,
+        skippedUnavailableMedia,
       })
 
       await message.reply(buildResendConfirmationPrompt(alreadyUploadedCount))
@@ -491,6 +513,7 @@ export async function handleIncomingMessage(message, source = "message") {
       messageIds,
       maxTimestamp,
       skippedTooLargeVideos,
+      skippedUnavailableMedia,
     })
   } catch (error) {
     console.error("Error handler message:", error)
