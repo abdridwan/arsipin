@@ -625,7 +625,28 @@ async function downloadQuotedMediaFromCommand(message) {
           addPoint() { return this },
         }
 
-        const DownloadManager = window.require('WAWebDownloadManager')?.downloadManager || window.Store?.DownloadManager
+        let DownloadManager = window.Store?.DownloadManager
+        if (!DownloadManager) {
+          try {
+            DownloadManager = window.require('WAWebDownloadManager')?.downloadManager
+          } catch (e) {}
+        }
+        
+        if (!DownloadManager && window.mR && window.mR.findModule) {
+          const mods = window.mR.findModule(m => m && m.downloadManager && m.downloadManager.downloadAndMaybeDecrypt)
+          if (mods && mods.length > 0) {
+            DownloadManager = mods[0].downloadManager
+          } else {
+            const decryptMods = window.mR.findModule(m => m && m.downloadAndMaybeDecrypt)
+            if (decryptMods && decryptMods.length > 0) {
+              DownloadManager = decryptMods[0]
+            }
+          }
+        }
+        
+        if (!DownloadManager || !DownloadManager.downloadAndMaybeDecrypt) {
+          throw new Error("DownloadManager module not found in WhatsApp Web")
+        }
         
         const decryptedMedia = await DownloadManager.downloadAndMaybeDecrypt({
           directPath: quoted.directPath,
