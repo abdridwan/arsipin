@@ -564,7 +564,14 @@ async function downloadMediaFromMessage(message) {
     throw createVideoTooLargeError(declaredSize)
   }
 
-  const media = await message.downloadMedia()
+  let media = null
+  try {
+    media = await message.downloadMedia()
+  } catch (e) {
+    console.error("Gagal native downloadMedia:", e.message)
+    return null
+  }
+
   if (!isSupportedMedia(media)) return null
   assertVideoSizeLimit(media)
 
@@ -574,54 +581,56 @@ async function downloadMediaFromMessage(message) {
 async function downloadQuotedMediaFromCommand(message) {
   if (!message?.hasQuotedMsg) return null
 
-  const result = await message.client.pupPage.evaluate(async (messageId) => {
-    const Msg = window.require ? window.require('WAWebCollections').Msg : window.Store.Msg
-    const msg = Msg.get(messageId) || (await Msg.getMessagesById([messageId]))?.messages?.[0]
+  let result
+  try {
+    result = await message.client.pupPage.evaluate(async (messageId) => {
+      const Msg = window.require ? window.require('WAWebCollections').Msg : window.Store.Msg
+      const msg = Msg.get(messageId) || (await Msg.getMessagesById([messageId]))?.messages?.[0]
 
-    if (!msg) return { status: "command_not_found" }
+      if (!msg) return { status: "command_not_found" }
 
-    const quoted = typeof msg.quotedMsgObj === 'function' ? msg.quotedMsgObj() : msg._quotedMsgObj
-    if (!quoted) return { status: "quoted_not_found" }
-    if (quoted.type !== "image" && quoted.type !== "video") {
-      return { status: "not_supported", type: quoted.type }
-    }
-    if (!quoted.mediaData) {
-      return { status: "media_data_missing", type: quoted.type }
-    }
-    if (quoted.mediaData.mediaStage === "REUPLOADING") {
-      return { status: "media_reuploading", type: quoted.type }
-    }
-
-    if (quoted.mediaData.mediaStage !== "RESOLVED") {
-      await quoted.downloadMedia({
-        downloadEvenIfExpensive: true,
-        rmrReason: 1,
-      })
-    }
-
-    if (
-      quoted.mediaData.mediaStage?.includes("ERROR") ||
-      quoted.mediaData.mediaStage === "FETCHING"
-    ) {
-      return {
-        status: "download_unavailable",
-        type: quoted.type,
-        mediaStage: quoted.mediaData.mediaStage,
+      const quoted = typeof msg.quotedMsgObj === 'function' ? msg.quotedMsgObj() : msg._quotedMsgObj
+      if (!quoted) return { status: "quoted_not_found" }
+      if (quoted.type !== "image" && quoted.type !== "video") {
+        return { status: "not_supported", type: quoted.type }
       }
-    }
-
-    try {
-      const mockQpl = {
-        addAnnotations() { return this },
-        addPoint() { return this },
+      if (!quoted.mediaData) {
+        return { status: "media_data_missing", type: quoted.type }
+      }
+      if (quoted.mediaData.mediaStage === "REUPLOADING") {
+        return { status: "media_reuploading", type: quoted.type }
       }
 
-      const DownloadManager = window.require('WAWebDownloadManager')?.downloadManager || window.Store?.DownloadManager
-      
-      const decryptedMedia = await DownloadManager.downloadAndMaybeDecrypt({
-        directPath: quoted.directPath,
-        encFilehash: quoted.encFilehash,
-        filehash: quoted.filehash,
+      if (quoted.mediaData.mediaStage !== "RESOLVED") {
+        await quoted.downloadMedia({
+          downloadEvenIfExpensive: true,
+          rmrReason: 1,
+        })
+      }
+
+      if (
+        quoted.mediaData.mediaStage?.includes("ERROR") ||
+        quoted.mediaData.mediaStage === "FETCHING"
+      ) {
+        return {
+          status: "download_unavailable",
+          type: quoted.type,
+          mediaStage: quoted.mediaData.mediaStage,
+        }
+      }
+
+      try {
+        const mockQpl = {
+          addAnnotations() { return this },
+          addPoint() { return this },
+        }
+
+        const DownloadManager = window.require('WAWebDownloadManager')?.downloadManager || window.Store?.DownloadManager
+        
+        const decryptedMedia = await DownloadManager.downloadAndMaybeDecrypt({
+          directPath: quoted.directPath,
+          encFilehash: quoted.encFilehash,
+          filehash: quoted.filehash,
           mediaKey: quoted.mediaKey,
           mediaKeyTimestamp: quoted.mediaKeyTimestamp,
           type: quoted.type,
@@ -629,28 +638,32 @@ async function downloadQuotedMediaFromCommand(message) {
           downloadQpl: mockQpl,
         })
 
-      const data = await window.WWebJS.arrayBufferToBase64Async(decryptedMedia)
+        const data = await window.WWebJS.arrayBufferToBase64Async(decryptedMedia)
 
-      return {
-        status: "ok",
-        data,
-        mimetype: quoted.mimetype,
-        filename: quoted.filename,
-        filesize: quoted.size,
-        type: quoted.type,
-      }
-    } catch (error) {
-      if (error?.status === 404) {
-        return { status: "not_found", type: quoted.type }
-      }
+        return {
+          status: "ok",
+          data,
+          mimetype: quoted.mimetype,
+          filename: quoted.filename,
+          filesize: quoted.size,
+          type: quoted.type,
+        }
+      } catch (error) {
+        if (error?.status === 404) {
+          return { status: "not_found", type: quoted.type }
+        }
 
-      return {
-        status: "download_error",
-        type: quoted.type,
-        message: error?.message || String(error),
+        return {
+          status: "download_error",
+          type: quoted.type,
+          message: error?.message || String(error),
+        }
       }
-    }
-  }, message.id._serialized)
+    }, message.id._serialized)
+  } catch (err) {
+    console.error("Error evaluating downloadQuotedMediaFromCommand:", err.message)
+    return null
+  }
 
   if (
     DEBUG_QUOTED_MEDIA ||
