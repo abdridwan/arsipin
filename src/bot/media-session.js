@@ -347,7 +347,26 @@ async function getRecentMediaFromChat(
 ) {
   try {
     const chat = await message.getChat()
-    const messages = await chat.fetchMessages({ limit })
+    
+    // Bypass fetchMessages karena WAWebChatLoadMessages rusak di WAWeb baru
+    const rawMessages = await message.client.pupPage.evaluate((chatId, limit) => {
+      let Chat = window.Store?.Chat
+      if (!Chat && window.mR && window.mR.findModule) {
+        const mods = window.mR.findModule(m => m && m.get && m.getModelsArray && m.find)
+        if (mods && mods.length > 0) Chat = mods[0]
+      }
+      const c = Chat?.get(chatId)
+      if (!c) return []
+      let msgs = c.msgs.getModelsArray()
+      if (msgs.length > limit) {
+        msgs.sort((a, b) => (a.t > b.t ? 1 : -1))
+        msgs = msgs.slice(msgs.length - limit)
+      }
+      return msgs.map((m) => window.WWebJS.getMessageModel(m))
+    }, chat.id._serialized, limit)
+    
+    const MessageClass = message.constructor
+    const messages = rawMessages.map((m) => new MessageClass(message.client, m))
 
     return messages
       .filter((item) => {
@@ -376,7 +395,26 @@ async function getRecentMediaFromChatForGroup(
 ) {
   try {
     const chat = await message.getChat()
-    const messages = await chat.fetchMessages({ limit })
+    
+    // Bypass fetchMessages karena WAWebChatLoadMessages rusak di WAWeb baru
+    const rawMessages = await message.client.pupPage.evaluate((chatId, limit) => {
+      let Chat = window.Store?.Chat
+      if (!Chat && window.mR && window.mR.findModule) {
+        const mods = window.mR.findModule(m => m && m.get && m.getModelsArray && m.find)
+        if (mods && mods.length > 0) Chat = mods[0]
+      }
+      const c = Chat?.get(chatId)
+      if (!c) return []
+      let msgs = c.msgs.getModelsArray()
+      if (msgs.length > limit) {
+        msgs.sort((a, b) => (a.t > b.t ? 1 : -1))
+        msgs = msgs.slice(msgs.length - limit)
+      }
+      return msgs.map((m) => window.WWebJS.getMessageModel(m))
+    }, chat.id._serialized, limit)
+    
+    const MessageClass = message.constructor
+    const messages = rawMessages.map((m) => new MessageClass(message.client, m))
 
     return messages
       .filter((item) => {
@@ -555,6 +593,99 @@ function assertVideoSizeLimit(media) {
   }
 }
 
+async function downloadMessageMedia(message) {
+  if (!message?.hasMedia) return null
+
+  let result
+  try {
+    result = await message.client.pupPage.evaluate(async (messageId) => {
+      let Msg = window.Store?.Msg
+      if (!Msg) {
+        try { Msg = window.require('WAWebCollections')?.Msg } catch(e) {}
+      }
+      if (!Msg && window.mR && window.mR.findModule) {
+        const mods = window.mR.findModule(m => m && m.get && m.getMessagesById)
+        if (mods && mods.length > 0) Msg = mods[0]
+      }
+      if (!Msg) throw new Error("Msg module not found")
+
+      const msg = Msg.get(messageId) || (await Msg.getMessagesById([messageId]))?.messages?.[0]
+      if (!msg) return { status: "not_found" }
+
+      if (msg.mediaData?.mediaStage !== "RESOLVED") {
+        await msg.downloadMedia({
+          downloadEvenIfExpensive: true,
+          rmrReason: 1,
+        })
+      }
+
+      if (
+        msg.mediaData?.mediaStage?.includes("ERROR") ||
+        msg.mediaData?.mediaStage === "FETCHING"
+      ) {
+        return { status: "download_unavailable" }
+      }
+
+      const mockQpl = { addAnnotations() { return this }, addPoint() { return this } }
+
+      let DownloadManager = window.Store?.DownloadManager
+      if (!DownloadManager) {
+        try { DownloadManager = window.require('WAWebDownloadManager')?.downloadManager } catch (e) {}
+      }
+      
+      if (!DownloadManager && window.mR && window.mR.findModule) {
+        const mods = window.mR.findModule(m => m && m.downloadManager && m.downloadManager.downloadAndMaybeDecrypt)
+        if (mods && mods.length > 0) DownloadManager = mods[0].downloadManager
+        else {
+          const decryptMods = window.mR.findModule(m => m && m.downloadAndMaybeDecrypt)
+          if (decryptMods && decryptMods.length > 0) DownloadManager = decryptMods[0]
+        }
+      }
+      
+      if (!DownloadManager || !DownloadManager.downloadAndMaybeDecrypt) {
+        throw new Error("DownloadManager module not found in WhatsApp Web")
+      }
+      
+      const decryptedMedia = await DownloadManager.downloadAndMaybeDecrypt({
+        directPath: msg.directPath,
+        encFilehash: msg.encFilehash,
+        filehash: msg.filehash,
+        mediaKey: msg.mediaKey,
+        mediaKeyTimestamp: msg.mediaKeyTimestamp,
+        type: msg.type,
+        signal: new AbortController().signal,
+        downloadQpl: mockQpl,
+      })
+
+      const data = await window.WWebJS.arrayBufferToBase64Async(decryptedMedia)
+
+      return {
+        status: "ok",
+        data,
+        mimetype: msg.mimetype,
+        filename: msg.filename,
+        filesize: msg.size,
+        type: msg.type,
+      }
+    }, message.id._serialized)
+  } catch (err) {
+    console.error("Error evaluating downloadMessageMedia:", err.message)
+    return null
+  }
+
+  if (result?.status === "ok") {
+    const pkg = await import("whatsapp-web.js")
+    const MessageMedia = pkg.default.MessageMedia || pkg.default.Structures?.MessageMedia
+    return new MessageMedia(
+      result.mimetype,
+      result.data,
+      result.filename,
+      result.filesize,
+    )
+  }
+  return null
+}
+
 async function downloadMediaFromMessage(message) {
   if (!message?.hasMedia) return null
   if (!isSupportedMessageType(message)) return null
@@ -566,7 +697,7 @@ async function downloadMediaFromMessage(message) {
 
   let media = null
   try {
-    media = await message.downloadMedia()
+    media = await downloadMessageMedia(message) || await message.downloadMedia()
   } catch (e) {
     console.error("Gagal native downloadMedia:", e.message)
     return null
@@ -584,7 +715,17 @@ async function downloadQuotedMediaFromCommand(message) {
   let result
   try {
     result = await message.client.pupPage.evaluate(async (messageId) => {
-      const Msg = window.require ? window.require('WAWebCollections').Msg : window.Store.Msg
+      let Msg = window.Store?.Msg
+      if (!Msg && window.mR && window.mR.findModule) {
+        const mods = window.mR.findModule(m => m && m.get && m.getMessagesById)
+        if (mods && mods.length > 0) Msg = mods[0]
+      }
+      if (!Msg) {
+        try { Msg = window.require('WAWebCollections')?.Msg } catch(e) {}
+      }
+      
+      if (!Msg) throw new Error("Msg module not found")
+
       const msg = Msg.get(messageId) || (await Msg.getMessagesById([messageId]))?.messages?.[0]
 
       if (!msg) return { status: "command_not_found" }
