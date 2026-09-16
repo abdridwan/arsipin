@@ -352,7 +352,7 @@ async function getRecentMediaFromChat(
     const rawMessages = await message.client.pupPage.evaluate((chatId, limit) => {
       let Chat = window.Store?.Chat
       if (!Chat && window.mR && window.mR.findModule) {
-        const mods = window.mR.findModule(m => m && m.get && m.getModelsArray && m.find)
+        const mods = window.mR.findModule(m => { try { return m && m.get && m.getModelsArray && m.find } catch(e){ return false } })
         if (mods && mods.length > 0) Chat = mods[0]
       }
       const c = Chat?.get(chatId)
@@ -400,7 +400,7 @@ async function getRecentMediaFromChatForGroup(
     const rawMessages = await message.client.pupPage.evaluate((chatId, limit) => {
       let Chat = window.Store?.Chat
       if (!Chat && window.mR && window.mR.findModule) {
-        const mods = window.mR.findModule(m => m && m.get && m.getModelsArray && m.find)
+        const mods = window.mR.findModule(m => { try { return m && m.get && m.getModelsArray && m.find } catch(e){ return false } })
         if (mods && mods.length > 0) Chat = mods[0]
       }
       const c = Chat?.get(chatId)
@@ -604,7 +604,7 @@ async function downloadMessageMedia(message) {
         try { Msg = window.require('WAWebCollections')?.Msg } catch(e) {}
       }
       if (!Msg && window.mR && window.mR.findModule) {
-        const mods = window.mR.findModule(m => m && m.get && m.getMessagesById)
+        const mods = window.mR.findModule(m => { try { return m && m.get && m.getMessagesById } catch(e){ return false } })
         if (mods && mods.length > 0) Msg = mods[0]
       }
       if (!Msg) throw new Error("Msg module not found")
@@ -636,10 +636,10 @@ async function downloadMessageMedia(message) {
       }
       
       if (!DownloadManager && window.mR && window.mR.findModule) {
-        const mods = window.mR.findModule(m => m && m.downloadManager && m.downloadManager.downloadAndMaybeDecrypt)
+        const mods = window.mR.findModule(m => { try { return m && m.downloadManager && m.downloadManager.downloadAndMaybeDecrypt } catch(e){ return false } })
         if (mods && mods.length > 0) DownloadManager = mods[0].downloadManager
         else {
-          const decryptMods = window.mR.findModule(m => m && m.downloadAndMaybeDecrypt)
+          const decryptMods = window.mR.findModule(m => { try { return m && m.downloadAndMaybeDecrypt } catch(e){ return false } })
           if (decryptMods && decryptMods.length > 0) DownloadManager = decryptMods[0]
         }
       }
@@ -672,7 +672,7 @@ async function downloadMessageMedia(message) {
     }, message.id._serialized)
   } catch (err) {
     console.error("Error evaluating downloadMessageMedia:", err.message)
-    return null
+    return { status: "error", error: err.message }
   }
 
   if (result?.status === "ok") {
@@ -684,6 +684,8 @@ async function downloadMessageMedia(message) {
       result.filename,
       result.filesize,
     )
+  } else {
+    console.error("downloadMessageMedia returned status:", result?.status, result?.error || "")
   }
   return null
 }
@@ -719,7 +721,7 @@ async function downloadQuotedMediaFromCommand(message) {
     result = await message.client.pupPage.evaluate(async (messageId) => {
       let Msg = window.Store?.Msg
       if (!Msg && window.mR && window.mR.findModule) {
-        const mods = window.mR.findModule(m => m && m.get && m.getMessagesById)
+        const mods = window.mR.findModule(m => { try { return m && m.get && m.getMessagesById } catch(e){ return false } })
         if (mods && mods.length > 0) Msg = mods[0]
       }
       if (!Msg) {
@@ -780,11 +782,11 @@ async function downloadQuotedMediaFromCommand(message) {
         }
         
         if (!DownloadManager && window.mR && window.mR.findModule) {
-          const mods = window.mR.findModule(m => m && m.downloadManager && m.downloadManager.downloadAndMaybeDecrypt)
+          const mods = window.mR.findModule(m => { try { return m && m.downloadManager && m.downloadManager.downloadAndMaybeDecrypt } catch(e){ return false } })
           if (mods && mods.length > 0) {
             DownloadManager = mods[0].downloadManager
           } else {
-            const decryptMods = window.mR.findModule(m => m && m.downloadAndMaybeDecrypt)
+            const decryptMods = window.mR.findModule(m => { try { return m && m.downloadAndMaybeDecrypt } catch(e){ return false } })
             if (decryptMods && decryptMods.length > 0) {
               DownloadManager = decryptMods[0]
             }
