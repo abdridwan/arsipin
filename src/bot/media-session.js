@@ -613,10 +613,12 @@ async function downloadMessageMedia(message) {
       if (!msg) return { status: "not_found" }
 
       if (msg.mediaData?.mediaStage !== "RESOLVED") {
-        await msg.downloadMedia({
-          downloadEvenIfExpensive: true,
-          rmrReason: 1,
-        })
+        try {
+          await msg.downloadMedia({
+            downloadEvenIfExpensive: true,
+            rmrReason: 1,
+          })
+        } catch(e) {}
       }
 
       if (
@@ -743,10 +745,14 @@ async function downloadQuotedMediaFromCommand(message) {
       }
 
       if (quoted.mediaData.mediaStage !== "RESOLVED") {
-        await quoted.downloadMedia({
-          downloadEvenIfExpensive: true,
-          rmrReason: 1,
-        })
+        try {
+          await quoted.downloadMedia({
+            downloadEvenIfExpensive: true,
+            rmrReason: 1,
+          })
+        } catch (e) {
+          // Ignore WhatsApp native errors
+        }
       }
 
       if (
