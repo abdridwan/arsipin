@@ -572,17 +572,15 @@ async function downloadMediaFromMessage(message) {
 }
 
 async function downloadQuotedMediaFromCommand(message) {
-  return null // dinonaktifkan sementara karena WA update merusak window.Store
   if (!message?.hasQuotedMsg) return null
 
   const result = await message.client.pupPage.evaluate(async (messageId) => {
-    const msg =
-      window.Store.Msg.get(messageId) ||
-      (await window.Store.Msg.getMessagesById([messageId]))?.messages?.[0]
+    const Msg = window.require ? window.require('WAWebCollections').Msg : window.Store.Msg
+    const msg = Msg.get(messageId) || (await Msg.getMessagesById([messageId]))?.messages?.[0]
 
     if (!msg) return { status: "command_not_found" }
 
-    const quoted = window.Store.QuotedMsg.getQuotedMsgObj(msg)
+    const quoted = typeof msg.quotedMsgObj === 'function' ? msg.quotedMsgObj() : msg._quotedMsgObj
     if (!quoted) return { status: "quoted_not_found" }
     if (quoted.type !== "image" && quoted.type !== "video") {
       return { status: "not_supported", type: quoted.type }
@@ -614,19 +612,16 @@ async function downloadQuotedMediaFromCommand(message) {
 
     try {
       const mockQpl = {
-        addAnnotations() {
-          return this
-        },
-        addPoint() {
-          return this
-        },
+        addAnnotations() { return this },
+        addPoint() { return this },
       }
 
-      const decryptedMedia =
-        await window.Store.DownloadManager.downloadAndMaybeDecrypt({
-          directPath: quoted.directPath,
-          encFilehash: quoted.encFilehash,
-          filehash: quoted.filehash,
+      const DownloadManager = window.require('WAWebDownloadManager')?.downloadManager || window.Store?.DownloadManager
+      
+      const decryptedMedia = await DownloadManager.downloadAndMaybeDecrypt({
+        directPath: quoted.directPath,
+        encFilehash: quoted.encFilehash,
+        filehash: quoted.filehash,
           mediaKey: quoted.mediaKey,
           mediaKeyTimestamp: quoted.mediaKeyTimestamp,
           type: quoted.type,
@@ -699,6 +694,15 @@ export async function getTargetMediaMessages(
         quoted = await message.getQuotedMessage()
       } catch (e) {
         console.error("Gagal getQuotedMessage:", e.message)
+      }
+    }
+
+    if (!quoted && message._data && message._data.quotedMsg) {
+      try {
+        console.log("Mencoba fallback manual dari message._data.quotedMsg")
+        quoted = new message.constructor(message.client, message._data.quotedMsg)
+      } catch (e) {
+        console.error("Gagal manual fallback:", e.message)
       }
     }
     const quotedTimestampMs = quoted ? normalizeMessageTimestampMs(quoted) : commandTimestampMs
